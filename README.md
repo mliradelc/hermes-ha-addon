@@ -98,6 +98,23 @@ Both ports are configurable in the Home Assistant add-on network settings. Use t
 | **8080** | HTTP access (all URLs above, replace 8443 with 8080) |
 | **8443** | HTTPS access (TLS with self-signed cert)             |
 
+### Webhooks
+
+The Hermes gateway listens on port 8644 internally and receives webhook events from external services such as GitLab, GitHub, and other platforms. Webhook requests are proxied through nginx on port 8080/8443 to the gateway.
+
+| Path | Description |
+| ---- | ----------- |
+| `/webhooks/{subscription-name}` | Receive events for a configured webhook subscription |
+
+Webhooks use their own HMAC signature validation — no nginx Basic Auth is required (and none is applied). Configure subscriptions via:
+
+```bash
+hermes webhook create   # Create a new subscription
+hermes webhook list     # List active subscriptions
+```
+
+To expose webhooks externally, route your reverse proxy or Cloudflare tunnel to `http://<ha-ip>:8080` — the `/webhooks/` path is open, all other paths remain protected by Basic Auth.
+
 ### SSH
 
 Via Home Assistant host + docker exec, no SSH server in container required. Port 22222 is the default for the Advanced SSH & Web Terminal add-on (adjust if yours differs).
@@ -145,6 +162,7 @@ Authentication layers differ by access path:
 - **Direct HTTP/HTTPS Ports** (8080/8443): two-layer auth protects the web UIs.
   1. **Basic Auth** (username `hermes`, password = `access_password`) gates the landing page, Terminal, and Dashboard HTML.
   2. **Session Token** (ephemeral, rotates on every add-on restart) gates dashboard API calls. The token is injected into the dashboard HTML on load — only clients who successfully loaded the page via Basic Auth ever see it. Requests to `/dashboard/api/*` without a matching Bearer token return 401. Only `/dashboard/api/status` is public (it mirrors Hermes' own whitelist and powers the landing page health indicator). If the dashboard process is restarted without restarting the add-on, the nginx-side token cache goes stale — restart the add-on to re-sync.
+- **Webhook endpoints** (`/webhooks/*`): Basic Auth is **disabled** — webhooks are authenticated by HMAC signature validation inside the gateway (e.g. `X-Hub-Signature-256` for GitHub, `X-Gitlab-Token` for GitLab). Never modify the gateway secret; rotate it via `hermes webhook create` if compromised.
 - **OpenAI-compatible API** (`/v1/*`): Bearer token authentication. The `access_password` doubles as the API key, passed as `Authorization: Bearer <password>`.
 
 If you expose direct ports to the internet, place a network-perimeter gate (firewall, VPN, reverse proxy with stronger auth) in front — Basic Auth alone is not brute-force resistant.
