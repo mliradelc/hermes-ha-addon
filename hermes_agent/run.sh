@@ -530,6 +530,14 @@ else
     echo "[run] Direct ports: disabled (Ingress only)"
 fi
 
+# Render webhook config (always included — gateway always starts)
+cp /etc/nginx/webhooks.conf.tpl /etc/nginx/webhooks.conf
+sed -i \
+    -e "s|%%AUTH_BASIC_ON%%|${AUTH_BASIC_ON}|g" \
+    -e "s|%%AUTH_BASIC_OFF%%|${AUTH_BASIC_OFF}|g" \
+    /etc/nginx/webhooks.conf
+echo "[run] Webhook proxy: enabled on direct ports"
+
 cp /etc/nginx/nginx.conf.tpl /etc/nginx/nginx.conf
 sed -i \
     -e "s|%%INGRESS_PORT%%|${INGRESS_PORT}|g" \
