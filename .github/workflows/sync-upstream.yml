@@ -1,0 +1,119 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC nightly
+  workflow_dispatch:        # manual trigger any time
+
+jobs:
+  sync:
+    name: Rebase local patches onto upstream main
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/WolframRavenwolf/hermes-ha-addon.git
+          git fetch upstream main --quiet
+
+      - name: Check if upstream has new commits
+        id: check
+        run: |
+          UPSTREAM_SHA=$(git rev-parse upstream/main)
+          MERGE_BASE=$(git merge-base HEAD upstream/main)
+          if [ "$UPSTREAM_SHA" = "$MERGE_BASE" ]; then
+            echo "up_to_date=true" >> $GITHUB_OUTPUT
+            echo "No new upstream commits — nothing to do."
+          else
+            BEHIND=$(git rev-list HEAD..upstream/main --count)
+            echo "up_to_date=false" >> $GITHUB_OUTPUT
+            echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+            echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
+            echo "Upstream has $BEHIND new commit(s)."
+            git log --oneline HEAD..upstream/main
+          fi
+
+      - name: Identify local patch commits (above upstream base)
+        if: steps.check.outputs.up_to_date == 'false'
+        id: patches
+        run: |
+          # Commits on main that are NOT in upstream/main
+          PATCH_COUNT=$(git rev-list upstream/main..HEAD --count)
+          echo "patch_count=$PATCH_COUNT" >> $GITHUB_OUTPUT
+          echo "Local patches to replay: $PATCH_COUNT"
+          git log --oneline upstream/main..HEAD
+
+      - name: Rebase local patches onto upstream/main
+        if: steps.check.outputs.up_to_date == 'false'
+        id: rebase
+        run: |
+          git rebase upstream/main 2>&1 | tee /tmp/rebase.log
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+      - name: Push rebased main
+        if: >
+          steps.check.outputs.up_to_date == 'false' &&
+          steps.rebase.outputs.exit_code == '0'
+        run: |
+          git push origin main --force-with-lease
+          echo "✅ Rebased and pushed. Local patches now on top of upstream."
+
+      - name: Handle rebase conflict — open issue
+        if: >
+          steps.check.outputs.up_to_date == 'false' &&
+          steps.rebase.outputs.exit_code != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git rebase --abort 2>/dev/null || true
+
+          UPSTREAM_URL="https://github.com/WolframRavenwolf/hermes-ha-addon/commit/${{ steps.check.outputs.upstream_sha }}"
+          PATCH_COUNT="${{ steps.patches.outputs.patch_count }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          LOG=$(head -40 /tmp/rebase.log)
+
+          BODY="## Upstream sync conflict
+
+          The nightly rebase of local patches onto \`WolframRavenwolf/hermes-ha-addon\` main failed.
+          Manual resolution required.
+
+          **Upstream commit:** [\`${{ steps.check.outputs.upstream_sha }}\`]($UPSTREAM_URL)
+          **Local patches:** $PATCH_COUNT commit(s) above upstream base
+          **Workflow run:** $RUN_URL
+
+          ### Rebase output
+          \`\`\`
+          $LOG
+          \`\`\`
+
+          ### Resolution steps
+          \`\`\`bash
+          git clone https://github.com/mliradelc/hermes-ha-addon && cd hermes-ha-addon
+          git remote add upstream https://github.com/WolframRavenwolf/hermes-ha-addon.git
+          git fetch upstream
+          git rebase upstream/main
+          # resolve conflicts, then:
+          git push origin main --force-with-lease
+          \`\`\`"
+
+          gh issue create \
+            --title "🔴 Upstream sync conflict — manual rebase required ($(date -u +%Y-%m-%d))" \
+            --body "$BODY" \
+            --label "upstream-sync"
+
+          echo "❌ Rebase failed. Issue created."
+          exit 1
